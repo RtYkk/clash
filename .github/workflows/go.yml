@@ -45,3 +45,9 @@ jobs:
           files: bin/*
           draft: true
           prerelease: true
+
+      - name: Upload dev_build_zip
+        uses: actions/upload-artifact@v2
+        with:
+          name: dev-build-zip
+          path: releases/*.zip
