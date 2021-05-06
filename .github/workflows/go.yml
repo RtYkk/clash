@@ -1,4 +1,4 @@
-name: Go
+name: Go_build
 on: [push, pull_request]
 jobs:
 
@@ -40,7 +40,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+_          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: bin/*
           draft: true
