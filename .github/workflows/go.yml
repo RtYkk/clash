@@ -35,17 +35,19 @@ jobs:
           BINDIR: bin
         run: make -j releases
 
+      - name: Upload dev_build_zip
+        uses: actions/upload-artifact@v2
+        with:
+          name: dev-build-zip
+          path: bin/*
+
+
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: bin/*
-          draft: true
+          draft: false
+          tag_name: test
           prerelease: true
-
-      - name: Upload dev_build_zip
-        uses: actions/upload-artifact@v2
-        with:
-          name: dev-build-zip
-          path: bin/*
