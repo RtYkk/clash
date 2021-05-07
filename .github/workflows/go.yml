@@ -1,5 +1,8 @@
 name: Go_build
-on: [push, pull_request]
+on:
+  watch:
+    types: [started]
+
 jobs:
 
   build:
