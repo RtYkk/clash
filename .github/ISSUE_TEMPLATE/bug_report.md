@@ -80,7 +80,7 @@ Paste the Clash core log below with the log level set to `DEBUG`.
 请详细、清晰地表达你要提出的论述，例如这个问题如何影响到你？你想实现什么功能？
 -->
 
-### 重现问题的具体布骤 Steps to Reproduce
+### 重现问题的具体步骤 Steps to Reproduce
 
 1. [First Step]
 2. [Second Step]
