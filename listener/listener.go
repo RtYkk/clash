@@ -1,41 +1,39 @@
-package proxy
+package listener
 
 import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
+	"github.com/Dreamacro/clash/config"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/listener/http"
 	"github.com/Dreamacro/clash/listener/mixed"
 	"github.com/Dreamacro/clash/listener/redir"
 	"github.com/Dreamacro/clash/listener/socks"
 	"github.com/Dreamacro/clash/listener/tproxy"
+	"github.com/Dreamacro/clash/listener/tunnel"
 	"github.com/Dreamacro/clash/log"
+
+	"github.com/samber/lo"
 )
 
 var (
 	allowLan    = false
 	bindAddress = "*"
 
-	socksListener     *socks.Listener
-	socksUDPListener  *socks.UDPListener
-	httpListener      *http.Listener
-	redirListener     *redir.Listener
-	redirUDPListener  *tproxy.UDPListener
-	tproxyListener    *tproxy.Listener
-	tproxyUDPListener *tproxy.UDPListener
-	mixedListener     *mixed.Listener
-	mixedUDPLister    *socks.UDPListener
+	tcpListeners = map[C.Inbound]C.Listener{}
+	udpListeners = map[C.Inbound]C.Listener{}
+
+	tunnelTCPListeners = map[string]*tunnel.Listener{}
+	tunnelUDPListeners = map[string]*tunnel.PacketConn{}
 
 	// lock for recreate function
-	socksMux  sync.Mutex
-	httpMux   sync.Mutex
-	redirMux  sync.Mutex
-	tproxyMux sync.Mutex
-	mixedMux  sync.Mutex
+	recreateMux sync.Mutex
+	tunnelMux   sync.Mutex
 )
 
 type Ports struct {
@@ -45,6 +43,26 @@ type Ports struct {
 	TProxyPort int `json:"tproxy-port"`
 	MixedPort  int `json:"mixed-port"`
 }
+
+var tcpListenerCreators = map[C.InboundType]tcpListenerCreator{
+	C.InboundTypeHTTP:   http.New,
+	C.InboundTypeSocks:  socks.New,
+	C.InboundTypeRedir:  redir.New,
+	C.InboundTypeTproxy: tproxy.New,
+	C.InboundTypeMixed:  mixed.New,
+}
+
+var udpListenerCreators = map[C.InboundType]udpListenerCreator{
+	C.InboundTypeSocks:  socks.NewUDP,
+	C.InboundTypeRedir:  tproxy.NewUDP,
+	C.InboundTypeTproxy: tproxy.NewUDP,
+	C.InboundTypeMixed:  socks.NewUDP,
+}
+
+type (
+	tcpListenerCreator func(addr string, tcpIn chan<- C.ConnContext) (C.Listener, error)
+	udpListenerCreator func(addr string, udpIn chan<- *inbound.PacketAdapter) (C.Listener, error)
+)
 
 func AllowLan() bool {
 	return allowLan
@@ -62,280 +80,257 @@ func SetBindAddress(host string) {
 	bindAddress = host
 }
 
-func ReCreateHTTP(port int, tcpIn chan<- C.ConnContext) {
-	httpMux.Lock()
-	defer httpMux.Unlock()
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start HTTP server error: %s", err.Error())
-		}
-	}()
-
-	addr := genAddr(bindAddress, port, allowLan)
-
-	if httpListener != nil {
-		if httpListener.RawAddress() == addr {
-			return
-		}
-		httpListener.Close()
-		httpListener = nil
-	}
-
+func createListener(inbound C.Inbound, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
+	addr := inbound.BindAddress
 	if portIsZero(addr) {
 		return
 	}
-
-	httpListener, err = http.New(addr, tcpIn)
-	if err != nil {
+	tcpCreator := tcpListenerCreators[inbound.Type]
+	udpCreator := udpListenerCreators[inbound.Type]
+	if tcpCreator == nil && udpCreator == nil {
+		log.Errorln("inbound type %s is not supported", inbound.Type)
 		return
 	}
-
-	log.Infoln("HTTP proxy listening at: %s", httpListener.Address())
+	if tcpCreator != nil {
+		tcpListener, err := tcpCreator(addr, tcpIn)
+		if err != nil {
+			log.Errorln("create addr %s tcp listener error: %v", addr, err)
+			return
+		}
+		tcpListeners[inbound] = tcpListener
+	}
+	if udpCreator != nil {
+		udpListener, err := udpCreator(addr, udpIn)
+		if err != nil {
+			log.Errorln("create addr %s udp listener error: %v", addr, err)
+			return
+		}
+		udpListeners[inbound] = udpListener
+	}
+	log.Infoln("inbound %s created successfully", inbound.ToAlias())
 }
 
-func ReCreateSocks(port int, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
-	socksMux.Lock()
-	defer socksMux.Unlock()
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start SOCKS server error: %s", err.Error())
+func closeListener(inbound C.Inbound) {
+	listener := tcpListeners[inbound]
+	if listener != nil {
+		if err := listener.Close(); err != nil {
+			log.Errorln("close tcp address `%s` error: %s", inbound.ToAlias(), err.Error())
 		}
-	}()
-
-	addr := genAddr(bindAddress, port, allowLan)
-
-	shouldTCPIgnore := false
-	shouldUDPIgnore := false
-
-	if socksListener != nil {
-		if socksListener.RawAddress() != addr {
-			socksListener.Close()
-			socksListener = nil
-		} else {
-			shouldTCPIgnore = true
+		delete(tcpListeners, inbound)
+	}
+	listener = udpListeners[inbound]
+	if listener != nil {
+		if err := listener.Close(); err != nil {
+			log.Errorln("close udp address `%s` error: %s", inbound.ToAlias(), err.Error())
 		}
+		delete(udpListeners, inbound)
 	}
-
-	if socksUDPListener != nil {
-		if socksUDPListener.RawAddress() != addr {
-			socksUDPListener.Close()
-			socksUDPListener = nil
-		} else {
-			shouldUDPIgnore = true
-		}
-	}
-
-	if shouldTCPIgnore && shouldUDPIgnore {
-		return
-	}
-
-	if portIsZero(addr) {
-		return
-	}
-
-	tcpListener, err := socks.New(addr, tcpIn)
-	if err != nil {
-		return
-	}
-
-	udpListener, err := socks.NewUDP(addr, udpIn)
-	if err != nil {
-		tcpListener.Close()
-		return
-	}
-
-	socksListener = tcpListener
-	socksUDPListener = udpListener
-
-	log.Infoln("SOCKS proxy listening at: %s", socksListener.Address())
 }
 
-func ReCreateRedir(port int, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
-	redirMux.Lock()
-	defer redirMux.Unlock()
+func getNeedCloseAndCreateInbound(originInbounds []C.Inbound, newInbounds []C.Inbound) ([]C.Inbound, []C.Inbound) {
+	needCloseMap := map[C.Inbound]bool{}
+	needClose := []C.Inbound{}
+	needCreate := []C.Inbound{}
 
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start Redir server error: %s", err.Error())
+	for _, inbound := range originInbounds {
+		needCloseMap[inbound] = true
+	}
+	for _, inbound := range newInbounds {
+		if needCloseMap[inbound] {
+			delete(needCloseMap, inbound)
+		} else {
+			needCreate = append(needCreate, inbound)
 		}
-	}()
-
-	addr := genAddr(bindAddress, port, allowLan)
-
-	if redirListener != nil {
-		if redirListener.RawAddress() == addr {
-			return
-		}
-		redirListener.Close()
-		redirListener = nil
 	}
-
-	if redirUDPListener != nil {
-		if redirUDPListener.RawAddress() == addr {
-			return
-		}
-		redirUDPListener.Close()
-		redirUDPListener = nil
+	for inbound := range needCloseMap {
+		needClose = append(needClose, inbound)
 	}
-
-	if portIsZero(addr) {
-		return
-	}
-
-	redirListener, err = redir.New(addr, tcpIn)
-	if err != nil {
-		return
-	}
-
-	redirUDPListener, err = tproxy.NewUDP(addr, udpIn)
-	if err != nil {
-		log.Warnln("Failed to start Redir UDP Listener: %s", err)
-	}
-
-	log.Infoln("Redirect proxy listening at: %s", redirListener.Address())
+	return needClose, needCreate
 }
 
-func ReCreateTProxy(port int, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
-	tproxyMux.Lock()
-	defer tproxyMux.Unlock()
-
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start TProxy server error: %s", err.Error())
+// only recreate inbound config listener
+func ReCreateListeners(inbounds []C.Inbound, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
+	newInbounds := []C.Inbound{}
+	newInbounds = append(newInbounds, inbounds...)
+	for _, inbound := range getInbounds() {
+		if inbound.IsFromPortCfg {
+			newInbounds = append(newInbounds, inbound)
 		}
-	}()
-
-	addr := genAddr(bindAddress, port, allowLan)
-
-	if tproxyListener != nil {
-		if tproxyListener.RawAddress() == addr {
-			return
-		}
-		tproxyListener.Close()
-		tproxyListener = nil
 	}
-
-	if tproxyUDPListener != nil {
-		if tproxyUDPListener.RawAddress() == addr {
-			return
-		}
-		tproxyUDPListener.Close()
-		tproxyUDPListener = nil
-	}
-
-	if portIsZero(addr) {
-		return
-	}
-
-	tproxyListener, err = tproxy.New(addr, tcpIn)
-	if err != nil {
-		return
-	}
-
-	tproxyUDPListener, err = tproxy.NewUDP(addr, udpIn)
-	if err != nil {
-		log.Warnln("Failed to start TProxy UDP Listener: %s", err)
-	}
-
-	log.Infoln("TProxy server listening at: %s", tproxyListener.Address())
+	reCreateListeners(newInbounds, tcpIn, udpIn)
 }
 
-func ReCreateMixed(port int, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
-	mixedMux.Lock()
-	defer mixedMux.Unlock()
+// only recreate ports config listener
+func ReCreatePortsListeners(ports Ports, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
+	newInbounds := []C.Inbound{}
+	newInbounds = append(newInbounds, GetInbounds()...)
+	newInbounds = addPortInbound(newInbounds, C.InboundTypeHTTP, ports.Port)
+	newInbounds = addPortInbound(newInbounds, C.InboundTypeSocks, ports.SocksPort)
+	newInbounds = addPortInbound(newInbounds, C.InboundTypeRedir, ports.RedirPort)
+	newInbounds = addPortInbound(newInbounds, C.InboundTypeTproxy, ports.TProxyPort)
+	newInbounds = addPortInbound(newInbounds, C.InboundTypeMixed, ports.MixedPort)
+	reCreateListeners(newInbounds, tcpIn, udpIn)
+}
 
-	var err error
-	defer func() {
-		if err != nil {
-			log.Errorln("Start Mixed(http+socks) server error: %s", err.Error())
-		}
-	}()
+func addPortInbound(inbounds []C.Inbound, inboundType C.InboundType, port int) []C.Inbound {
+	if port != 0 {
+		inbounds = append(inbounds, C.Inbound{
+			Type:          inboundType,
+			BindAddress:   genAddr(bindAddress, port, allowLan),
+			IsFromPortCfg: true,
+		})
+	}
+	return inbounds
+}
 
-	addr := genAddr(bindAddress, port, allowLan)
+func reCreateListeners(inbounds []C.Inbound, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
+	recreateMux.Lock()
+	defer recreateMux.Unlock()
+	needClose, needCreate := getNeedCloseAndCreateInbound(getInbounds(), inbounds)
+	for _, inbound := range needClose {
+		closeListener(inbound)
+	}
+	for _, inbound := range needCreate {
+		createListener(inbound, tcpIn, udpIn)
+	}
+}
 
-	shouldTCPIgnore := false
-	shouldUDPIgnore := false
+func PatchTunnel(tunnels []config.Tunnel, tcpIn chan<- C.ConnContext, udpIn chan<- *inbound.PacketAdapter) {
+	tunnelMux.Lock()
+	defer tunnelMux.Unlock()
 
-	if mixedListener != nil {
-		if mixedListener.RawAddress() != addr {
-			mixedListener.Close()
-			mixedListener = nil
+	type addrProxy struct {
+		network string
+		addr    string
+		target  string
+		proxy   string
+	}
+
+	tcpOld := lo.Map(
+		lo.Keys(tunnelTCPListeners),
+		func(key string, _ int) addrProxy {
+			parts := strings.Split(key, "/")
+			return addrProxy{
+				network: "tcp",
+				addr:    parts[0],
+				target:  parts[1],
+				proxy:   parts[2],
+			}
+		},
+	)
+	udpOld := lo.Map(
+		lo.Keys(tunnelUDPListeners),
+		func(key string, _ int) addrProxy {
+			parts := strings.Split(key, "/")
+			return addrProxy{
+				network: "udp",
+				addr:    parts[0],
+				target:  parts[1],
+				proxy:   parts[2],
+			}
+		},
+	)
+	oldElm := lo.Union(tcpOld, udpOld)
+
+	newElm := lo.FlatMap(
+		tunnels,
+		func(tunnel config.Tunnel, _ int) []addrProxy {
+			return lo.Map(
+				tunnel.Network,
+				func(network string, _ int) addrProxy {
+					return addrProxy{
+						network: network,
+						addr:    tunnel.Address,
+						target:  tunnel.Target,
+						proxy:   tunnel.Proxy,
+					}
+				},
+			)
+		},
+	)
+
+	needClose, needCreate := lo.Difference(oldElm, newElm)
+
+	for _, elm := range needClose {
+		key := fmt.Sprintf("%s/%s/%s", elm.addr, elm.target, elm.proxy)
+		if elm.network == "tcp" {
+			tunnelTCPListeners[key].Close()
+			delete(tunnelTCPListeners, key)
 		} else {
-			shouldTCPIgnore = true
+			tunnelUDPListeners[key].Close()
+			delete(tunnelUDPListeners, key)
 		}
 	}
-	if mixedUDPLister != nil {
-		if mixedUDPLister.RawAddress() != addr {
-			mixedUDPLister.Close()
-			mixedUDPLister = nil
+
+	for _, elm := range needCreate {
+		key := fmt.Sprintf("%s/%s/%s", elm.addr, elm.target, elm.proxy)
+		if elm.network == "tcp" {
+			l, err := tunnel.New(elm.addr, elm.target, elm.proxy, tcpIn)
+			if err != nil {
+				log.Errorln("Start tunnel %s error: %s", elm.target, err.Error())
+				continue
+			}
+			tunnelTCPListeners[key] = l
+			log.Infoln("Tunnel(tcp/%s) proxy %s listening at: %s", elm.target, elm.proxy, tunnelTCPListeners[key].Address())
 		} else {
-			shouldUDPIgnore = true
+			l, err := tunnel.NewUDP(elm.addr, elm.target, elm.proxy, udpIn)
+			if err != nil {
+				log.Errorln("Start tunnel %s error: %s", elm.target, err.Error())
+				continue
+			}
+			tunnelUDPListeners[key] = l
+			log.Infoln("Tunnel(udp/%s) proxy %s listening at: %s", elm.target, elm.proxy, tunnelUDPListeners[key].Address())
 		}
 	}
+}
 
-	if shouldTCPIgnore && shouldUDPIgnore {
-		return
+func GetInbounds() []C.Inbound {
+	return lo.Filter(getInbounds(), func(inbound C.Inbound, idx int) bool {
+		return !inbound.IsFromPortCfg
+	})
+}
+
+// GetInbounds return the inbounds of proxy servers
+func getInbounds() []C.Inbound {
+	var inbounds []C.Inbound
+	for inbound := range tcpListeners {
+		inbounds = append(inbounds, inbound)
 	}
-
-	if portIsZero(addr) {
-		return
+	for inbound := range udpListeners {
+		if _, ok := tcpListeners[inbound]; !ok {
+			inbounds = append(inbounds, inbound)
+		}
 	}
-
-	mixedListener, err = mixed.New(addr, tcpIn)
-	if err != nil {
-		return
-	}
-
-	mixedUDPLister, err = socks.NewUDP(addr, udpIn)
-	if err != nil {
-		mixedListener.Close()
-		return
-	}
-
-	log.Infoln("Mixed(http+socks) proxy listening at: %s", mixedListener.Address())
+	return inbounds
 }
 
 // GetPorts return the ports of proxy servers
 func GetPorts() *Ports {
 	ports := &Ports{}
-
-	if httpListener != nil {
-		_, portStr, _ := net.SplitHostPort(httpListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.Port = port
+	for _, inbound := range getInbounds() {
+		fillPort(inbound, ports)
 	}
-
-	if socksListener != nil {
-		_, portStr, _ := net.SplitHostPort(socksListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.SocksPort = port
-	}
-
-	if redirListener != nil {
-		_, portStr, _ := net.SplitHostPort(redirListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.RedirPort = port
-	}
-
-	if tproxyListener != nil {
-		_, portStr, _ := net.SplitHostPort(tproxyListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.TProxyPort = port
-	}
-
-	if mixedListener != nil {
-		_, portStr, _ := net.SplitHostPort(mixedListener.Address())
-		port, _ := strconv.Atoi(portStr)
-		ports.MixedPort = port
-	}
-
 	return ports
+}
+
+func fillPort(inbound C.Inbound, ports *Ports) {
+	if inbound.IsFromPortCfg {
+		port := getPort(inbound.BindAddress)
+		switch inbound.Type {
+		case C.InboundTypeHTTP:
+			ports.Port = port
+		case C.InboundTypeSocks:
+			ports.SocksPort = port
+		case C.InboundTypeTproxy:
+			ports.TProxyPort = port
+		case C.InboundTypeRedir:
+			ports.RedirPort = port
+		case C.InboundTypeMixed:
+			ports.MixedPort = port
+		default:
+			// do nothing
+		}
+	}
 }
 
 func portIsZero(addr string) bool {
@@ -355,4 +350,16 @@ func genAddr(host string, port int, allowLan bool) string {
 	}
 
 	return fmt.Sprintf("127.0.0.1:%d", port)
+}
+
+func getPort(addr string) int {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return 0
+	}
+	return port
 }

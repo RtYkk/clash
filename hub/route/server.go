@@ -2,17 +2,19 @@ package route
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+	"unsafe"
 
 	C "github.com/Dreamacro/clash/constant"
-	_ "github.com/Dreamacro/clash/constant/mime"
 	"github.com/Dreamacro/clash/log"
 	"github.com/Dreamacro/clash/tunnel/statistic"
 
+	"github.com/Dreamacro/protobytes"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
@@ -67,10 +69,12 @@ func Start(addr string, secret string) {
 		r.Get("/traffic", traffic)
 		r.Get("/version", version)
 		r.Mount("/configs", configRouter())
+		r.Mount("/inbounds", inboundRouter())
 		r.Mount("/proxies", proxyRouter())
 		r.Mount("/rules", ruleRouter())
 		r.Mount("/connections", connectionRouter())
 		r.Mount("/providers/proxies", proxyProviderRouter())
+		r.Mount("/dns", dnsRouter())
 	})
 
 	if uiPath != "" {
@@ -95,6 +99,12 @@ func Start(addr string, secret string) {
 	}
 }
 
+func safeEuqal(a, b string) bool {
+	aBuf := unsafe.Slice(unsafe.StringData(a), len(a))
+	bBuf := unsafe.Slice(unsafe.StringData(b), len(b))
+	return subtle.ConstantTimeCompare(aBuf, bBuf) == 1
+}
+
 func authentication(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		if serverSecret == "" {
@@ -105,7 +115,7 @@ func authentication(next http.Handler) http.Handler {
 		// Browser websocket not support custom header
 		if websocket.IsWebSocketUpgrade(r) && r.URL.Query().Get("token") != "" {
 			token := r.URL.Query().Get("token")
-			if token != serverSecret {
+			if !safeEuqal(token, serverSecret) {
 				render.Status(r, http.StatusUnauthorized)
 				render.JSON(w, r, ErrUnauthorized)
 				return
@@ -118,7 +128,7 @@ func authentication(next http.Handler) http.Handler {
 		bearer, token, found := strings.Cut(header, " ")
 
 		hasInvalidHeader := bearer != "Bearer"
-		hasInvalidSecret := !found || token != serverSecret
+		hasInvalidSecret := !found || !safeEuqal(token, serverSecret)
 		if hasInvalidHeader || hasInvalidSecret {
 			render.Status(r, http.StatusUnauthorized)
 			render.JSON(w, r, ErrUnauthorized)
@@ -151,12 +161,12 @@ func traffic(w http.ResponseWriter, r *http.Request) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	t := statistic.DefaultManager
-	buf := &bytes.Buffer{}
+	buf := protobytes.BytesWriter{}
 	var err error
 	for range tick.C {
 		buf.Reset()
 		up, down := t.Now()
-		if err := json.NewEncoder(buf).Encode(Traffic{
+		if err := json.NewEncoder(&buf).Encode(Traffic{
 			Up:   up,
 			Down: down,
 		}); err != nil {
@@ -208,16 +218,27 @@ func getLogs(w http.ResponseWriter, r *http.Request) {
 		render.Status(r, http.StatusOK)
 	}
 
+	ch := make(chan log.Event, 1024)
 	sub := log.Subscribe()
 	defer log.UnSubscribe(sub)
 	buf := &bytes.Buffer{}
-	var err error
-	for elm := range sub {
-		buf.Reset()
-		log := elm.(*log.Event)
+
+	go func() {
+		for elm := range sub {
+			log := elm.(log.Event)
+			select {
+			case ch <- log:
+			default:
+			}
+		}
+		close(ch)
+	}()
+
+	for log := range ch {
 		if log.LogLevel < level {
 			continue
 		}
+		buf.Reset()
 
 		if err := json.NewEncoder(buf).Encode(Log{
 			Type:    log.Type(),
@@ -226,6 +247,7 @@ func getLogs(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		var err error
 		if wsConn == nil {
 			_, err = w.Write(buf.Bytes())
 			w.(http.Flusher).Flush()
