@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"github.com/Dreamacro/clash/common/utils"
 	"github.com/Dreamacro/clash/constant"
 )
 
@@ -66,23 +67,35 @@ type Provider interface {
 type ProxyProvider interface {
 	Provider
 	Proxies() []constant.Proxy
-	// ProxiesWithTouch is used to inform the provider that the proxy is actually being used while getting the list of proxies.
+	// Touch is used to inform the provider that the proxy is actually being used while getting the list of proxies.
 	// Commonly used in DialContext and DialPacketConn
-	ProxiesWithTouch() []constant.Proxy
+	Touch()
 	HealthCheck()
+	Version() uint32
+	RegisterHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint)
 }
 
-// Rule Type
+// RuleProvider interface
+type RuleProvider interface {
+	Provider
+	Behavior() RuleBehavior
+	Match(*constant.Metadata) bool
+	ShouldResolveIP() bool
+	ShouldFindProcess() bool
+	AsRule(adaptor string) constant.Rule
+}
+
+// Rule Behavior
 const (
-	Domain RuleType = iota
+	Domain RuleBehavior = iota
 	IPCIDR
 	Classical
 )
 
-// RuleType defined
-type RuleType int
+// RuleBehavior defined
+type RuleBehavior int
 
-func (rt RuleType) String() string {
+func (rt RuleBehavior) String() string {
 	switch rt {
 	case Domain:
 		return "Domain"
@@ -95,11 +108,20 @@ func (rt RuleType) String() string {
 	}
 }
 
-// RuleProvider interface
-type RuleProvider interface {
-	Provider
-	Behavior() RuleType
-	Match(*constant.Metadata) bool
-	ShouldResolveIP() bool
-	AsRule(adaptor string) constant.Rule
+const (
+	YamlRule RuleFormat = iota
+	TextRule
+)
+
+type RuleFormat int
+
+func (rf RuleFormat) String() string {
+	switch rf {
+	case YamlRule:
+		return "YamlRule"
+	case TextRule:
+		return "TextRule"
+	default:
+		return "Unknown"
+	}
 }

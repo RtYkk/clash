@@ -2,8 +2,8 @@ package mixed
 
 import (
 	"net"
-	"time"
 
+	"github.com/Dreamacro/clash/adapter/inbound"
 	"github.com/Dreamacro/clash/common/cache"
 	N "github.com/Dreamacro/clash/common/net"
 	C "github.com/Dreamacro/clash/constant"
@@ -16,7 +16,7 @@ import (
 type Listener struct {
 	listener net.Listener
 	addr     string
-	cache    *cache.Cache
+	cache    *cache.LruCache[string, bool]
 	closed   bool
 }
 
@@ -36,8 +36,14 @@ func (l *Listener) Close() error {
 	return l.listener.Close()
 }
 
-func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
-	l, err := net.Listen("tcp", addr)
+func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+	if len(additions) == 0 {
+		additions = []inbound.Addition{
+			inbound.WithInName("DEFAULT-MIXED"),
+			inbound.WithSpecialRules(""),
+		}
+	}
+	l, err := inbound.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +51,7 @@ func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
 	ml := &Listener{
 		listener: l,
 		addr:     addr,
-		cache:    cache.New(30 * time.Second),
+		cache:    cache.New[string, bool](cache.WithAge[string, bool](30)),
 	}
 	go func() {
 		for {
@@ -56,15 +62,15 @@ func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
 				}
 				continue
 			}
-			go handleConn(c, in, ml.cache)
+			go handleConn(c, tunnel, ml.cache, additions...)
 		}
 	}()
 
 	return ml, nil
 }
 
-func handleConn(conn net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
-	conn.(*net.TCPConn).SetKeepAlive(true)
+func handleConn(conn net.Conn, tunnel C.Tunnel, cache *cache.LruCache[string, bool], additions ...inbound.Addition) {
+	N.TCPKeepAlive(conn)
 
 	bufConn := N.NewBufferedConn(conn)
 	head, err := bufConn.Peek(1)
@@ -74,10 +80,10 @@ func handleConn(conn net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
 
 	switch head[0] {
 	case socks4.Version:
-		socks.HandleSocks4(bufConn, in)
+		socks.HandleSocks4(bufConn, tunnel, additions...)
 	case socks5.Version:
-		socks.HandleSocks5(bufConn, in)
+		socks.HandleSocks5(bufConn, tunnel, additions...)
 	default:
-		http.HandleConn(bufConn, in, cache)
+		http.HandleConn(bufConn, tunnel, cache, additions...)
 	}
 }

@@ -2,28 +2,16 @@ package tunnel
 
 import (
 	"errors"
-	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	N "github.com/Dreamacro/clash/common/net"
-	"github.com/Dreamacro/clash/common/pool"
-	"github.com/Dreamacro/clash/component/resolver"
 	C "github.com/Dreamacro/clash/constant"
+	"github.com/Dreamacro/clash/log"
 )
 
 func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, metadata *C.Metadata) error {
-	defer packet.Drop()
-
-	// local resolve UDP dns
-	if !metadata.Resolved() {
-		ip, err := resolver.ResolveIP(metadata.Host)
-		if err != nil {
-			return err
-		}
-		metadata.DstIP = ip
-	}
-
 	addr := metadata.UDPAddr()
 	if addr == nil {
 		return errors.New("udp addr invalid")
@@ -33,56 +21,67 @@ func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, metadata *C.Metadata
 		return err
 	}
 	// reset timeout
-	pc.SetReadDeadline(time.Now().Add(udpTimeout))
+	_ = pc.SetReadDeadline(time.Now().Add(udpTimeout))
 
 	return nil
 }
 
-func handleUDPToLocal(packet C.UDPPacket, pc net.PacketConn, key string, fAddr net.Addr) {
-	buf := pool.Get(pool.UDPBufferSize)
-	defer pool.Put(buf)
-	defer natTable.Delete(key)
-	defer pc.Close()
+func handleUDPToLocal(writeBack C.WriteBack, pc N.EnhancePacketConn, key string, oAddrPort netip.AddrPort, fAddr netip.Addr) {
+	defer func() {
+		_ = pc.Close()
+		closeAllLocalCoon(key)
+		natTable.Delete(key)
+	}()
 
 	for {
-		pc.SetReadDeadline(time.Now().Add(udpTimeout))
-		n, from, err := pc.ReadFrom(buf)
+		_ = pc.SetReadDeadline(time.Now().Add(udpTimeout))
+		data, put, from, err := pc.WaitReadFrom()
 		if err != nil {
 			return
 		}
 
-		if fAddr != nil {
-			from = fAddr
+		fromUDPAddr, isUDPAddr := from.(*net.UDPAddr)
+		if !isUDPAddr {
+			fromUDPAddr = net.UDPAddrFromAddrPort(oAddrPort) // oAddrPort was Unmapped
+			log.Warnln("server return a [%T](%s) which isn't a *net.UDPAddr, force replace to (%s), this may be caused by a wrongly implemented server", from, from, oAddrPort)
+		} else if fromUDPAddr == nil {
+			fromUDPAddr = net.UDPAddrFromAddrPort(oAddrPort) // oAddrPort was Unmapped
+			log.Warnln("server return a nil *net.UDPAddr, force replace to (%s), this may be caused by a wrongly implemented server", oAddrPort)
+		} else {
+			_fromUDPAddr := *fromUDPAddr
+			fromUDPAddr = &_fromUDPAddr // make a copy
+			if fromAddr, ok := netip.AddrFromSlice(fromUDPAddr.IP); ok {
+				fromAddr = fromAddr.Unmap()
+				if fAddr.IsValid() && (oAddrPort.Addr() == fromAddr) { // oAddrPort was Unmapped
+					fromAddr = fAddr.Unmap()
+				}
+				fromUDPAddr.IP = fromAddr.AsSlice()
+				if fromAddr.Is4() {
+					fromUDPAddr.Zone = "" // only ipv6 can have the zone
+				}
+			}
 		}
 
-		_, err = packet.WriteBack(buf[:n], from)
+		_, err = writeBack.WriteBack(data, fromUDPAddr)
+		if put != nil {
+			put()
+		}
 		if err != nil {
 			return
 		}
 	}
 }
 
-func handleSocket(ctx C.ConnContext, outbound net.Conn) {
-	relay(ctx.Conn(), outbound)
+func closeAllLocalCoon(lAddr string) {
+	natTable.RangeForLocalConn(lAddr, func(key string, value *net.UDPConn) bool {
+		conn := value
+
+		conn.Close()
+		log.Debugln("Closing TProxy local conn... lAddr=%s rAddr=%s", lAddr, key)
+		return true
+	})
 }
 
-// relay copies between left and right bidirectionally.
-func relay(leftConn, rightConn net.Conn) {
-	ch := make(chan error)
-
-	go func() {
-		buf := pool.Get(pool.RelayBufferSize)
-		// Wrapping to avoid using *net.TCPConn.(ReadFrom)
-		// See also https://github.com/Dreamacro/clash/pull/1209
-		_, err := io.CopyBuffer(N.WriteOnlyWriter{Writer: leftConn}, N.ReadOnlyReader{Reader: rightConn}, buf)
-		pool.Put(buf)
-		leftConn.SetReadDeadline(time.Now())
-		ch <- err
-	}()
-
-	buf := pool.Get(pool.RelayBufferSize)
-	io.CopyBuffer(N.WriteOnlyWriter{Writer: rightConn}, N.ReadOnlyReader{Reader: leftConn}, buf)
-	pool.Put(buf)
-	rightConn.SetReadDeadline(time.Now())
-	<-ch
+func handleSocket(ctx C.ConnContext, outbound net.Conn) {
+	N.Relay(ctx.Conn(), outbound)
 }

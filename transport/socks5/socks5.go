@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 
 	"github.com/Dreamacro/clash/component/auth"
@@ -298,6 +299,50 @@ func ReadAddr(r io.Reader, b []byte) (Addr, error) {
 	return nil, ErrAddressNotSupported
 }
 
+func ReadAddr0(r io.Reader) (Addr, error) {
+	aType, err := ReadByte(r) // read 1st byte for address type
+	if err != nil {
+		return nil, err
+	}
+
+	switch aType {
+	case AtypDomainName:
+		var domainLength byte
+		domainLength, err = ReadByte(r) // read 2nd byte for domain length
+		if err != nil {
+			return nil, err
+		}
+		b := make([]byte, 1+1+uint16(domainLength)+2)
+		_, err = io.ReadFull(r, b[2:])
+		b[0] = aType
+		b[1] = domainLength
+		return b, err
+	case AtypIPv4:
+		var b [1 + net.IPv4len + 2]byte
+		_, err = io.ReadFull(r, b[1:])
+		b[0] = aType
+		return b[:], err
+	case AtypIPv6:
+		var b [1 + net.IPv6len + 2]byte
+		_, err = io.ReadFull(r, b[1:])
+		b[0] = aType
+		return b[:], err
+	}
+
+	return nil, ErrAddressNotSupported
+}
+
+func ReadByte(reader io.Reader) (byte, error) {
+	if br, isBr := reader.(io.ByteReader); isBr {
+		return br.ReadByte()
+	}
+	var b [1]byte
+	if _, err := io.ReadFull(reader, b[:]); err != nil {
+		return 0, err
+	}
+	return b[0], nil
+}
+
 // SplitAddr slices a SOCKS address from beginning of b. Returns nil if failed.
 func SplitAddr(b []byte) Addr {
 	addrLen := 1
@@ -396,6 +441,21 @@ func ParseAddrToSocksAddr(addr net.Addr) Addr {
 		binary.BigEndian.PutUint16(parsed[1+net.IPv6len:], uint16(port))
 	}
 	return parsed
+}
+
+func AddrFromStdAddrPort(addrPort netip.AddrPort) Addr {
+	addr := addrPort.Addr()
+	if addr.Is4() {
+		ip4 := addr.As4()
+		return []byte{AtypIPv4, ip4[0], ip4[1], ip4[2], ip4[3], byte(addrPort.Port() >> 8), byte(addrPort.Port())}
+	}
+
+	buf := make([]byte, 1+net.IPv6len+2)
+	buf[0] = AtypIPv6
+	copy(buf[1:], addr.AsSlice())
+	buf[1+net.IPv6len] = byte(addrPort.Port() >> 8)
+	buf[1+net.IPv6len+1] = byte(addrPort.Port())
+	return buf
 }
 
 // DecodeUDPPacket split `packet` to addr payload, and this function is mutable with `packet`

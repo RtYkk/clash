@@ -9,9 +9,8 @@ import (
 	"sync"
 
 	"github.com/Dreamacro/clash/common/pool"
+	"github.com/Dreamacro/clash/transport/shadowsocks/shadowaead"
 	"github.com/Dreamacro/clash/transport/socks5"
-
-	"github.com/Dreamacro/go-shadowsocks2/shadowaead"
 )
 
 const (
@@ -242,6 +241,9 @@ func ReadPacket(r io.Reader, payload []byte) (net.Addr, int, error) {
 		return nil, 0, errors.New("remote address invalid")
 	}
 	uAddr := addr.UDPAddr()
+	if uAddr == nil {
+		return nil, 0, errors.New("parse addr error")
+	}
 
 	length := len(payload)
 	if n-headLen < length {

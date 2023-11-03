@@ -1,16 +1,15 @@
 package dns
 
 import (
-	"bytes"
 	"context"
 	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Dreamacro/clash/component/dhcp"
 	"github.com/Dreamacro/clash/component/iface"
-	"github.com/Dreamacro/clash/component/resolver"
-
 	D "github.com/miekg/dns"
 )
 
@@ -27,29 +26,34 @@ type dhcpClient struct {
 	ifaceInvalidate time.Time
 	dnsInvalidate   time.Time
 
-	ifaceAddr *net.IPNet
+	ifaceAddr netip.Prefix
 	done      chan struct{}
-	resolver  *Resolver
+	clients   []dnsClient
 	err       error
 }
 
-func (d *dhcpClient) Exchange(m *D.Msg) (msg *D.Msg, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), resolver.DefaultDNSTimeout)
-	defer cancel()
+var _ dnsClient = (*dhcpClient)(nil)
 
-	return d.ExchangeContext(ctx, m)
+// Address implements dnsClient
+func (d *dhcpClient) Address() string {
+	addrs := make([]string, 0)
+	for _, c := range d.clients {
+		addrs = append(addrs, c.Address())
+	}
+	return strings.Join(addrs, ",")
 }
 
 func (d *dhcpClient) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
-	res, err := d.resolve(ctx)
+	clients, err := d.resolve(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return res.ExchangeContext(ctx, m)
+	msg, _, err = batchExchange(ctx, clients, m)
+	return
 }
 
-func (d *dhcpClient) resolve(ctx context.Context) (*Resolver, error) {
+func (d *dhcpClient) resolve(ctx context.Context) ([]dnsClient, error) {
 	d.lock.Lock()
 
 	invalidated, err := d.invalidate()
@@ -64,8 +68,9 @@ func (d *dhcpClient) resolve(ctx context.Context) (*Resolver, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), DHCPTimeout)
 			defer cancel()
 
-			var res *Resolver
+			var res []dnsClient
 			dns, err := dhcp.ResolveDNSFromDHCP(ctx, d.ifaceName)
+			// dns never empty if err is nil
 			if err == nil {
 				nameserver := make([]NameServer, 0, len(dns))
 				for _, item := range dns {
@@ -75,9 +80,7 @@ func (d *dhcpClient) resolve(ctx context.Context) (*Resolver, error) {
 					})
 				}
 
-				res = NewResolver(Config{
-					Main: nameserver,
-				})
+				res = transform(nameserver, nil)
 			}
 
 			d.lock.Lock()
@@ -86,7 +89,7 @@ func (d *dhcpClient) resolve(ctx context.Context) (*Resolver, error) {
 			close(done)
 
 			d.done = nil
-			d.resolver = res
+			d.clients = res
 			d.err = err
 		}()
 	}
@@ -96,7 +99,7 @@ func (d *dhcpClient) resolve(ctx context.Context) (*Resolver, error) {
 	for {
 		d.lock.Lock()
 
-		res, err, done := d.resolver, d.err, d.done
+		res, err, done := d.clients, d.err, d.done
 
 		d.lock.Unlock()
 
@@ -127,12 +130,12 @@ func (d *dhcpClient) invalidate() (bool, error) {
 		return false, err
 	}
 
-	addr, err := ifaceObj.PickIPv4Addr(nil)
+	addr, err := ifaceObj.PickIPv4Addr(netip.Addr{})
 	if err != nil {
 		return false, err
 	}
 
-	if time.Now().Before(d.dnsInvalidate) && d.ifaceAddr.IP.Equal(addr.IP) && bytes.Equal(d.ifaceAddr.Mask, addr.Mask) {
+	if time.Now().Before(d.dnsInvalidate) && d.ifaceAddr == addr {
 		return false, nil
 	}
 

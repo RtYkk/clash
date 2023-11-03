@@ -1,57 +1,98 @@
 <h1 align="center">
-  <img src="https://github.com/Dreamacro/clash/raw/master/docs/logo.png" alt="Clash" width="200">
-  <br>Clash<br>
+  <img src="Meta.png" alt="Meta Kennel" width="200">
+  <br>Meta Kernel<br>
 </h1>
 
-<h4 align="center">A rule-based tunnel in Go.</h4>
+<h3 align="center">Another Clash Kernel.</h3>
 
 <p align="center">
-  <a href="https://github.com/Dreamacro/clash/actions">
-    <img src="https://img.shields.io/github/workflow/status/Dreamacro/clash/Go?style=flat-square" alt="Github Actions">
-  </a>
-  <a href="https://goreportcard.com/report/github.com/Dreamacro/clash">
-    <img src="https://goreportcard.com/badge/github.com/Dreamacro/clash?style=flat-square">
+  <a href="https://goreportcard.com/report/github.com/Clash-Mini/Clash.Meta">
+    <img src="https://goreportcard.com/badge/github.com/Clash-Mini/Clash.Meta?style=flat-square">
   </a>
   <img src="https://img.shields.io/github/go-mod/go-version/Dreamacro/clash?style=flat-square">
-  <a href="https://github.com/Dreamacro/clash/releases">
-    <img src="https://img.shields.io/github/release/Dreamacro/clash/all.svg?style=flat-square">
+  <a href="https://github.com/Clash-Mini/Clash.Meta/releases">
+    <img src="https://img.shields.io/github/release/Clash-Mini/Clash.Meta/all.svg?style=flat-square">
   </a>
-  <a href="https://github.com/Dreamacro/clash/releases/tag/premium">
-    <img src="https://img.shields.io/badge/release-Premium-00b4f0?style=flat-square">
+  <a href="https://github.com/Clash-Mini/Clash.Meta">
+    <img src="https://img.shields.io/badge/release-Meta-00b4f0?style=flat-square">
   </a>
 </p>
 
 ## Features
 
 - Local HTTP/HTTPS/SOCKS server with authentication support
-- VMess, Shadowsocks, Trojan, Snell protocol support for remote connections
+- VMess, VLESS, Shadowsocks, Trojan, Snell, TUIC, Hysteria protocol support
 - Built-in DNS server that aims to minimize DNS pollution attack impact, supports DoH/DoT upstream and fake IP.
 - Rules based off domains, GEOIP, IPCIDR or Process to forward packets to different nodes
-- Remote groups allow users to implement powerful rules. Supports automatic fallback, load balancing or auto select node based off latency
-- Remote providers, allowing users to get node lists remotely instead of hardcoding in config
+- Remote groups allow users to implement powerful rules. Supports automatic fallback, load balancing or auto select node
+  based off latency
+- Remote providers, allowing users to get node lists remotely instead of hard-coding in config
 - Netfilter TCP redirecting. Deploy Clash on your Internet gateway with `iptables`.
 - Comprehensive HTTP RESTful API controller
 
-## Premium Features
+## Dashboard
 
-- TUN mode on macOS, Linux and Windows. [Doc](https://github.com/Dreamacro/clash/wiki/premium-core-features#tun-device)
-- Match your tunnel by [Script](https://github.com/Dreamacro/clash/wiki/premium-core-features#script)
-- [Rule Provider](https://github.com/Dreamacro/clash/wiki/premium-core-features#rule-providers)
+A web dashboard with first-class support for this project has been created; it can be checked out at [metacubexd](https://github.com/MetaCubeX/metacubexd).
 
-## Getting Started
-Documentations are now moved to [GitHub Wiki](https://github.com/Dreamacro/clash/wiki).
+## Configration example
 
-## Premium Release
-[Release](https://github.com/Dreamacro/clash/releases/tag/premium)
+Configuration example is located at [/docs/config.yaml](https://github.com/MetaCubeX/Clash.Meta/blob/Alpha/docs/config.yaml).
 
-## Development
-If you want to build an application that uses clash as a library, check out the the [GitHub Wiki](https://github.com/Dreamacro/clash/wiki/use-clash-as-a-library)
+## Docs
+
+Documentation can be found in [Clash.Meta Docs](https://clash-meta.wiki).
+
+## For development
+
+Requirements:
+[Go 1.20 or newer](https://go.dev/dl/)
+
+Build Clash.Meta:
+
+```shell
+git clone https://github.com/MetaCubeX/Clash.Meta.git
+cd Clash.Meta && go mod download
+go build
+```
+
+Set go proxy if a connection to GitHub is not possible:
+
+```shell
+go env -w GOPROXY=https://goproxy.io,direct
+```
+
+Build with gvisor tun stack:
+
+```shell
+go build -tags with_gvisor
+```
+
+### IPTABLES configuration
+
+Work on Linux OS which supported `iptables`
+
+```yaml
+# Enable the TPROXY listener
+tproxy-port: 9898
+
+iptables:
+  enable: true # default is false
+  inbound-interface: eth0 # detect the inbound interface, default is 'lo'
+```
+
+## Debugging
+
+Check [wiki](https://wiki.metacubex.one/api/#debug) to get an instruction on using debug
+API.
 
 ## Credits
 
-* [riobard/go-shadowsocks2](https://github.com/riobard/go-shadowsocks2)
-* [v2ray/v2ray-core](https://github.com/v2ray/v2ray-core)
-* [WireGuard/wireguard-go](https://github.com/WireGuard/wireguard-go)
+- [Dreamacro/clash](https://github.com/Dreamacro/clash)
+- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
+- [riobard/go-shadowsocks2](https://github.com/riobard/go-shadowsocks2)
+- [v2ray/v2ray-core](https://github.com/v2ray/v2ray-core)
+- [WireGuard/wireguard-go](https://github.com/WireGuard/wireguard-go)
+- [yaling888/clash-plus-pro](https://github.com/yaling888/clash)
 
 ## License
 

@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
 	"github.com/Dreamacro/clash/common/cache"
@@ -15,16 +14,11 @@ import (
 	"github.com/Dreamacro/clash/log"
 )
 
-func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
-	client := newClient(c.RemoteAddr(), in)
+func HandleConn(c net.Conn, tunnel C.Tunnel, cache *cache.LruCache[string, bool], additions ...inbound.Addition) {
+	client := newClient(c, tunnel, additions...)
 	defer client.CloseIdleConnections()
 
-	var conn *N.BufferedConn
-	if bufConn, ok := c.(*N.BufferedConn); ok {
-		conn = bufConn
-	} else {
-		conn = N.NewBufferedConn(c)
-	}
+	conn := N.NewBufferedConn(c)
 
 	keepAlive := true
 	trusted := cache == nil // disable authenticate if cache is nil
@@ -54,7 +48,7 @@ func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
 					break // close connection
 				}
 
-				in <- inbound.NewHTTPS(request, conn)
+				tunnel.HandleTCPConn(inbound.NewHTTPS(request, conn, additions...))
 
 				return // hijack connection
 			}
@@ -65,6 +59,12 @@ func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
 			}
 
 			request.RequestURI = ""
+
+			if isUpgradeRequest(request) {
+				handleUpgrade(conn, request, tunnel, additions...)
+
+				return // hijack connection
+			}
 
 			removeHopByHopHeaders(request.Header)
 			removeExtraHTTPHostPort(request)
@@ -95,11 +95,14 @@ func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
 		}
 	}
 
-	conn.Close()
+	_ = conn.Close()
 }
 
-func authenticate(request *http.Request, cache *cache.Cache) *http.Response {
+func authenticate(request *http.Request, cache *cache.LruCache[string, bool]) *http.Response {
 	authenticator := authStore.Authenticator()
+	if inbound.SkipAuthRemoteAddress(request.RemoteAddr) {
+		authenticator = nil
+	}
 	if authenticator != nil {
 		credential := parseBasicProxyAuthorization(request)
 		if credential == "" {
@@ -108,13 +111,13 @@ func authenticate(request *http.Request, cache *cache.Cache) *http.Response {
 			return resp
 		}
 
-		var authed any
-		if authed = cache.Get(credential); authed == nil {
+		authed, exist := cache.Get(credential)
+		if !exist {
 			user, pass, err := decodeBasicProxyAuthorization(credential)
 			authed = err == nil && authenticator.Verify(user, pass)
-			cache.Put(credential, authed, time.Minute)
+			cache.Set(credential, authed)
 		}
-		if !authed.(bool) {
+		if !authed {
 			log.Infoln("Auth failed from %s", request.RemoteAddr)
 
 			return responseWith(request, http.StatusForbidden)
